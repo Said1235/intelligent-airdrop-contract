@@ -1,3 +1,4 @@
+import json
 import sys
 
 import pytest
@@ -42,6 +43,10 @@ def airdrop(direct_vm, direct_deploy, direct_owner):
     direct_vm.sender = direct_owner
     c = direct_deploy(CONTRACT)
     c.set_requirements(["Must have joined the community", "Must have posted once"])
+    c.set_evidence_rules(json.dumps([
+        {"requirement": 0, "kind": "subjective"},
+        {"requirement": 1, "kind": "subjective"},
+    ]))
     return c
 
 
@@ -176,7 +181,8 @@ def test_prompt_enumerates_five_strings_and_carries_evidence_and_rules(
 def test_get_claim_includes_reason_field(airdrop, direct_vm, direct_alice):
     submit(direct_vm, airdrop, direct_alice, 1, "some evidence")
     got = airdrop.get_claim(1)
-    assert set(got) == {"claimant", "evidence_text", "status", "reason"}
+    assert set(got) == {"claimant", "evidence_text", "status", "reason",
+                        "results", "commitment", "policy_hash"}
     assert got["evidence_text"] == "some evidence"
     assert got["claimant"] == direct_alice or str(got["claimant"]) == str(direct_alice)
 
@@ -184,6 +190,8 @@ def test_get_claim_includes_reason_field(airdrop, direct_vm, direct_alice):
 def test_pending_claim_has_empty_reason(airdrop, direct_vm, direct_alice):
     submit(direct_vm, airdrop, direct_alice, 1)
     assert_pending(airdrop, 1)
+    got = airdrop.get_claim(1)
+    assert got["results"] == "" and got["commitment"] == "" and got["policy_hash"] == ""
 
 
 def test_get_claim_unknown_id_reverts(airdrop):

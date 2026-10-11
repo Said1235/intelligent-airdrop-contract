@@ -1,124 +1,64 @@
-# Intelligent Airdrop — Change + Audit Report
+# AUDIT_REPORT — Intelligent Airdrop, evidence acquisition round
 
-Contract: `contracts/intelligent_airdrop.py` (runner `py-genlayer:1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6`, unchanged)
-SHA-256 (this contract): `db98eaee4505734d5a32664b01a8edd459debea64fed89fbd4f76e9cbba972d3`
-SHA-256 (original, CRLF→LF only): `60510dc220fdcf149f4f02664942968c04764156a7e7fdaa27aa836b5053705e`
+Contract SHA-256: `556b6c057833c28e47c6316aadd3a737d55018d6ad24580f164bc936cb5b8173` (runner `1jb45…`, unchanged). Result: see FINAL_AUDIT.md (**AUDIT UNVERIFIED**; no CRITICAL/HIGH open in the contract logic).
 
-**Result: AUDIT UNVERIFIED** — no CRITICAL or HIGH finding; the contract logic, linter, schema and 95 Direct Mode tests pass, but Studio/integration deployment and "tested = deployed" could not be demonstrated from this environment (see §5).
+## Findings fixed in this round
 
-## 1. Change applied (only this was changed)
+### EVD-01 — HIGH — No evidence acquisition (the rejection)
+- **Requirement / source:** every externally checkable requirement; no source existed.
+- **Current behavior (before):** validators re-judged the same claimant text.
+- **Failure scenario:** see EVIDENCE_GAP_ANALYSIS.md (fabricated donation + self-hosted URL → `qualifies`).
+- **Why validation failed:** leader and validators shared one unsupported input; agreement proved nothing.
+- **Correction:** organizer-declared `external` rules; leader and each validator fetch the source and derive the same canonical result (`_collect_evidence`, `run_nondet_unsafe`).
+- **Regression tests:** `test_A_unsupported_assertion_cannot_qualify`, `test_H_all_verified_qualifies_with_commitment`, `test_I_validator_rejects_when_decision_relevant_evidence_differs`.
+- **Official source:** web-access page ("leader and validators make independent requests"; return stable fields); equivalence-principle page (`run_nondet_unsafe`: validator re-runs and compares decision fields).
 
-| Item | Before | After |
-|---|---|---|
-| Whitelist | `VALID_VERDICTS` | `VALID_VERDICT_REASON_PAIRS` (5 exact combined strings) |
-| Validator fn | `_normalize_verdict` | `_normalize_verdict_and_reason(raw) -> str` (whole pair checked, else `gl.vm.UserError("invalid LLM output: …")`) |
-| `Claim` | `claimant, evidence_text, status` | + `reason` (`""` while pending) |
-| `submit_claim` | status="pending" | + `reason=""` |
-| `evaluate_claim` | stores `status` | prompt lists the 5 strings and demands exactly one; validate pair → `status, reason = combined.split(":")` → write both |
-| `get_claim` | claimant, evidence_text, status | + `reason` |
+### EVD-02 — HIGH — Claimant-supplied URL as locator/proof
+- **Before:** a URL in `evidence_text` was only text.
+- **Scenario:** claimant points to a page he controls.
+- **Correction:** claimants never supply locators; sources come only from organizer rules; `evidence_text` is not an input to stage 1.
+- **Tests:** `test_B_claimant_supplied_url_is_never_fetched_or_trusted`.
+- **Source:** prompt-injection page (restrict inputs).
 
-Everything else is byte-identical apart from CRLF→LF line endings and one docstring sentence. `genvm-lint schema` output is identical before/after (`get_claim` already returned untyped `dict`).
+### EVD-03 — HIGH — No claimant identity binding
+- **Scenario:** a valid record of someone else's activity is presented as one's own.
+- **Correction:** rule must contain `{claimant}` (URL or eq/eq_ci); wallet comes from the stored `sender_address`; unbound rules are rejected at configuration.
+- **Tests:** `test_D_identity_mismatch_is_contradicted`, `test_set_evidence_rules_rejects_bad_rules[not bound…]`, `test_N_two_callers_get_independent_evidence`.
 
-**Decision record — normalization (Option A):** `raw.strip().lower()` is applied *before* the whole pair is checked against the whitelist, and the canonical lower-case string is what is split and stored. Anything else (extra text, other separators, inner spaces, punctuation, quotes, multiple answers, zero-width/NBSP chars, non-str) is rejected. Option B (exact match, no normalization) was not chosen; it would only turn harmless case/whitespace noise into reverted, retry-able transactions.
+### EVD-04 — MEDIUM — Decision-bearing fields not bound to consensus
+- **Correction:** consensus value = canonical JSON `{v, claimant, policy, results[], commitment}`; the verdict is derived deterministically from `results` after consensus; `status/reason/results/commitment/policy_hash` are written together. A forged leader result is rejected (`test_validator_rejects_a_forged_leader_result`) and malformed results are rejected by `_parse_evidence`.
 
-**INVARIANT-08:** status and reason are written together from one validated string. `pending ⇒ reason == ""`; `qualifies ⇒ meets_all_requirements`; `does_not_qualify ⇒` exactly one of the 4 rejection reasons. Writers of `status`/`reason` in the whole contract: `submit_claim` (pending, "") and `evaluate_claim` (validated pair). There are no others.
+### EVD-05 — MEDIUM — Source failure could become a verdict
+- **Correction:** non-200 (except organizer-declared `missing_status`), empty/oversized/malformed body, unexpected structure → `UserError`, no write, retry possible; "action disproven" (MISSING/CONTRADICTED) is distinct from "could not verify now".
+- **Tests:** `test_KL_source_failure_aborts_and_claim_stays_pending` (11 cases), `test_aborted_evaluation_can_be_retried_when_source_recovers`.
 
-## 2. Findings
+### EVD-06 — MEDIUM — No source/evidence commitment
+- **Correction:** `commitment` = SHA3-256 over `[index, url, [[path, op, observed], …]]` of every external rule; part of the canonical string the validators must reproduce byte-for-byte; stored with the claim. Volatile, unchecked response fields (timestamps, counters) are deliberately excluded so honest validators do not diverge; **any checked value** that differs changes the commitment and breaks consensus (`test_I_irrelevant_fields_do_not_break_consensus_but_checked_ones_do`, `test_I_commitment_changes_when_a_checked_value_changes`). Trade-off: unchecked fields are not committed.
 
-No CRITICAL / HIGH / MEDIUM. Nothing below was "fixed" because each is a design/behaviour decision outside the requested change; the contract was explicitly not to be redesigned. Each has a recommended fix.
+### EVD-07 — MEDIUM — Every rule judged by LLM from text
+- **Correction:** the LLM runs only for requirements the organizer explicitly declares `subjective`, only if no external requirement is MISSING/CONTRADICTED, sees only the subjective rules, and never sees fetched documents (`test_M_fetched_documents_never_reach_the_llm`, `test_mixed_llm_not_called_when_external_missing_even_if_llm_would_qualify`).
 
-### AUD-01 — LOW — `claim_id` is a global, caller-chosen key (squatting)
-- **Location:** `submit_claim`, `claims: TreeMap[u256, Claim]`
-- **Failure scenario:** Alice intends to use `claim_id=42`; Mallory submits `42` first. Alice's submit reverts with "claim_id already exists"; `get_claim(42)` returns Mallory as claimant. Alice must pick another id.
-- **Why allowed:** the id is an arbitrary u256 not derived from the sender.
-- **Invariant:** none violated inside the contract (the record is never mixed: claimant/evidence are fixed at creation and never overwritten — tests `test_duplicate_claim_id_reverts_and_keeps_first`).
-- **Fix (if the id is meant to mean something):** treat `claim_id` as opaque and key any off-chain/downstream logic on `claimant` from `get_claim`, never on the id.
-- **Test:** `test_duplicate_claim_id_reverts_and_keeps_first`, `test_two_callers_distinct_ids_are_independent`
-- **Source:** GenLayer SDK `TreeMap` storage semantics (runner 1jb45…); `gl.message.sender_address`.
+## Residual risks (not fixable in contract code)
 
-### AUD-02 — LOW — No one-claim-per-wallet rule
-- **Location:** `submit_claim`
-- **Scenario:** one wallet submits claims 1…N, each can reach `qualifies`. A downstream payer that counts "qualified claims" instead of "qualified wallets" pays N times.
-- **Why allowed:** uniqueness is only per `claim_id`. The module docstring states the contract is a pure eligibility oracle and does not handle assets.
-- **Fix:** downstream must dedupe by `claimant`; or add a `TreeMap[Address, u256]` index (behaviour change — not applied).
-- **Test:** `test_multiple_claims_same_caller_are_independent` (documents current behaviour: records never cross).
+| ID | Sev | Risk | Mitigation / recommendation |
+|---|---|---|---|
+| R-01 | MEDIUM | The organizer is the trust root: the contract checks a source's form and claimant binding, not whether the host is authoritative (a user-writable source is still "https"). | Choose first-party / chain-backed sources; publish rules (`get_evidence_rules`). |
+| R-02 | MEDIUM | A class-B rule declared `subjective` is again judged from claimant text. Declaration is explicit but not policed. | Review the rules before use; the default requirements are subjective by nature (BLOCKED as external). |
+| R-03 | MEDIUM | Sources can change between leader and validator fetch; no block/finality pinning exists in the API surface used. | Prefer finalized/immutable records; a mismatch yields disagreement/retry, never acceptance. Liveness cost only. |
+| R-04 | LOW | Expressiveness: no upper bound / time-window op, no array search (only fixed indices), no auth headers, redirects/timeouts not controllable, no pagination. | Use per-wallet endpoints exposing a scalar; extend ops only if needed. |
+| R-05 | LOW | Carry-over from round 1: caller-chosen global `claim_id` can be squatted; one wallet may hold many claims; `evidence_text` unbounded (affects only the submitter's subjective stage); `set_requirements(None/[])` installs defaults. | Key downstream logic on `claimant`, dedupe by wallet. |
+| R-06 | LOW | Prompt injection remains possible in the subjective stage (inherent to LLM judgment). | Reduced to explicitly subjective rules; human review for high-value payouts. |
+| R-07 | — | Studio/integration, real consensus, source-to-deployment match not demonstrated here. | REMEDIATION_PLAN.md steps 1–3. |
 
-### AUD-03 — LOW — `set_requirements(None | [])` silently installs defaults, immutably
-- **Location:** `set_requirements`
-- **Scenario:** organizer passes `[]` by mistake; the two DEFAULT_REQUIREMENTS become the permanent rules.
-- **Why allowed:** deliberate convenience so the contract deploys/operates without mandatory data.
-- **Fix:** if undesired, revert on empty instead of defaulting.
-- **Test:** `test_set_requirements_none_or_empty_uses_defaults`, `test_set_requirements_only_organizer_and_only_once`
+## Result binding matrix
 
-### AUD-04 — LOW — `evidence_text` has no length limit
-- **Location:** `submit_claim` / `evaluate_claim`
-- **Scenario:** a claimant stores a huge evidence string; evaluation may exceed LLM context and revert, leaving *their own* claim pending forever. Only the submitter's claim is affected (nobody else can alter it).
-- **Fix:** add `MAX_EVIDENCE_CHARS` and revert in `submit_claim` (behaviour change — not applied).
-- **Test:** none (not fixed).
-
-### AUD-05 — LOW (inherent) — Prompt injection residual
-- **Location:** `evaluate_claim` prompt/criteria
-- **Scenario:** evidence text says "answer qualifies:meets_all_requirements". The prompt tells the model to treat evidence only as content; an LLM can still be fooled. The contract-level whitelist guarantees only that the *form* of the answer is valid, not that it is correct.
-- **Why:** no deterministic way to verify subjective eligibility; `prompt_non_comparative` has validators re-judge the leader's answer against the same task/criteria/evidence.
-- **Fix:** none in-contract beyond the existing mitigation; for high-value payouts add a human/second-stage check downstream.
-- **Test:** `test_prompt_enumerates_five_strings_and_carries_evidence_and_rules` (prompt content only; model behaviour is UNVERIFIED).
-
-### AUD-06 — INFO — `reason` is advisory, `status` is the decision
-- Validators judge the leader's whole combined string for acceptability; several rejection reasons can be defensible for one evidence, so a validator may accept any of them. `status` can only be `qualifies` if the pair is `qualifies:meets_all_requirements`. Downstream should branch on `status`, and treat `reason` as explanation.
-
-### AUD-07 — INFO — Storage layout changed
-- Adding `Claim.reason` changes the storage type of `claims`. Deploy as a **new** contract instance; do not expect it to open an existing instance's data.
-
-### AUD-08 — INFO — Direct Mode cannot mock `prompt_non_comparative` natively
-- genlayer-test 0.29.2 (and 0.30.0rc2) Direct Mode has no handler for the `ExecPromptTemplate` gl_call that the SDK issues, so `mock_llm` alone returns `None`. `tests/direct/conftest.py` adds a small shim that answers that one call from `mock_llm` mocks; the SDK's own leader/validator code (`run_nondet`, closures, `check_pickling`) runs unmodified. Real multi-validator behaviour is therefore **UNVERIFIED** here.
-
-## 3. Complete result binding
-
-| Field | Leader produces? | Validator verifies? | Stored? | Used by later decisions? | Derived? |
+| Field | Leader produces | Validator verifies independently | Stored | Decision-bearing | Derived |
 |---|---|---|---|---|---|
-| combined string | yes (single LLM answer) | yes — validator LLM judges this exact string for the same evidence/criteria | no (transient) | — | — |
-| `status` | via combined string | yes (part of the string) | yes | `evaluate_claim` guard (`!= "pending"`), downstream | **derived** by `split(":")` of the validated string |
-| `reason` | via combined string | yes (part of the string) | yes | advisory | **derived**, same split |
-| `evidence_text` | no (user input at submit) | re-read by each validator from on-chain storage | yes | input to judgment | no |
-| `claimant` | no | n/a | yes (`sender_address`) | downstream identity | no |
+| `results[i]` (VERIFIED/MISSING/CONTRADICTED/SUBJECTIVE) | yes | yes — re-fetches and re-derives; byte-equality | yes (`results`) | yes | by deterministic checks |
+| `commitment` | yes | yes — part of the compared string | yes | evidence link | hash of checked fields |
+| `claimant`, `policy` in result | yes | yes | `policy_hash` yes | binds to rules | from storage |
+| `status`, `reason` | no | n/a — not proposed | yes | yes | **derived after consensus** from `results` (+ whitelisted LLM pair for subjective only) |
+| subjective LLM pair | yes | validators judge it (`prompt_non_comparative`) then whole-pair whitelist | via status/reason | yes (only if all external VERIFIED) | split of validated string |
+| `evidence_text` | claimant | not used for external rules | yes | subjective stage only | — |
 
-No decision-bearing field is produced by the leader outside the string the validators judge: there is no "overall status verified, details unchecked" pattern.
-
-## 4. Audit checklist (A–T)
-
-- **A Wallet-list / exact record:** no wallet lists, no diffing, no "latest/last record" lookup; records are keyed by explicit `claim_id`. Not applicable beyond AUD-01.
-- **B Overwrite:** `submit_claim` rejects an existing id; `evaluate_claim` rejects non-pending. Tests: duplicate/double-evaluate tests keep the original pair.
-- **C Score/tolerance/threshold:** no scores, tolerances, buckets or thresholds exist.
-- **D Source commitment:** no external source is fetched. The only input is `evidence_text`, stored on-chain at submit time and read from storage by leader and validators; the on-chain copy *is* the evidence, so a source hash would be decorative and none was added.
-- **E Result binding:** §3.
-- **F/G Verdict/reason invariant, exhaustive pairs:** whitelist of 5; all 5 cross-invalid pairs (`qualifies:<4 rejection reasons>`, `does_not_qualify:meets_all_requirements`) and 24 malformed strings (plus non-str inputs) are rejected (parametrized tests); mutation checks confirm.
-- **H LLM output validation:** whole-pair whitelist, non-str rejected, Option A normalization.
-- **I Error → default:** every error path raises `gl.vm.UserError` before any write; tests assert the claim stays `pending`/`""` and can be retried.
-- **J Contradictory state:** impossible by construction (INVARIANT-08); no other writer.
-- **K Source/result consistency:** result is judged against the stored evidence and the stored fixed rules only.
-- **L Nondeterministic boundary:** only `prompt_non_comparative`; closures capture `str` values only (storage is copied to memory first); `check_pickling` enabled in tests, no warnings.
-- **M Equivalence principle:** `gl.eq_principle.prompt_non_comparative` — appropriate for a subjective judgment of untrusted text with no external source. SDK source (`genlayer/gl/eq_principle.py`): leader runs `fn()` then an LLM task; validator re-runs `fn()` itself, then asks an LLM whether the leader's output satisfies task/criteria; a leader error ⇒ validator votes False. `strict_eq` would be wrong (LLM text is not bit-reproducible); `prompt_comparative` adds nothing here.
-- **N Validator independence:** each validator computes its own input and judgment; it does not trust the leader's string without judging it. Direct-Mode tests cover agree / disagree / leader-error (`run_validator`).
-- **O/P Tests / regression:** 95 tests, existing behaviour (requirements lifecycle, duplicate, double-evaluate, empty evidence, evaluate-before-requirements) covered; no original tests were provided, so none were deleted.
-- **Q Linter/schema:** `genvm-lint check` → ok (3 passed), only I200 "newer runner available" (runner intentionally not migrated); schema unchanged.
-- **R Over-engineering:** none added (no hash, no tolerance, no new storage besides `reason`).
-
-## 5. Final verification (T)
-
-1. Can a contradictory verdict/reason pair be stored? **NO** — whole pair whitelisted before split.
-2. Can status and reason be modified independently? **NO** — the only writers are `submit_claim` (pending/"") and one atomic write in `evaluate_claim`; no setter exists; re-evaluation is blocked.
-3. Can the validator accept the overall verdict while important details differ? **NO** — there is one answer string; status and reason are derived from exactly the string validated (see AUD-06 for the advisory nature of `reason`).
-4. Can source content change without detection, when source integrity matters? **NO / N/A** — no external source; evidence is immutable on-chain after `submit_claim`.
-5. Can a tolerance produce a later decision mismatch? **NO / N/A** — no tolerance.
-6. Can two requests from the same caller return the wrong record? **NO** — records are addressed by explicit `claim_id`; test `test_multiple_claims_same_caller_are_independent`.
-7. Can one request overwrite another? **NO** — duplicate ids revert; evaluated claims cannot be re-evaluated.
-8. Can mandatory state remain empty while appearing valid? **NO** — pending is explicit (`"pending"`, `reason ""`); `evaluate_claim` refuses empty rules; a claim never exists with default/empty status. (AUD-03: empty rules passed to `set_requirements` become explicit defaults, never an empty valid set.)
-9. Can malformed LLM output become a valid record? **NO** — rejected by the whitelist; the claim stays pending.
-10. Does the code tested match the code linted and deployed? **Tested = linted: YES** (same file, hash above; re-run from the unzipped package). **Deployed: UNVERIFIED** — ⚠️ UNVERIFIED / BLOCKED: deployment to Studio/localnet not performed from this environment — compare the hash above with the code pasted in Studio (`sha256sum contracts/intelligent_airdrop.py`).
-
-## 6. How this was checked
-
-- `genvm-lint check` and `genvm-lint schema` (genvm-linter 0.11.1rc2, SDK from genvm-manager v0.6.0-rc3) — before and after.
-- `pytest` Direct Mode (genlayer-test 0.29.2), `strict_mocks` + `check_pickling` on: 95 passed.
-- Mutation check (not shipped): 14 deliberate contract breakages (whitelist widened, isinstance/lower/strip removed, reason or status not written, validation skipped, get_claim without reason, wrong pending reason, prompt missing a pair, duplicate/re-evaluate/empty-rules guards removed) — all caught.
-- **Not run:** Studio / localnet / GLSim integration, real multi-validator consensus, real LLM behaviour.
+No stored decision-bearing field comes from the leader unverified.
